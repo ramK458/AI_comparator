@@ -11,20 +11,14 @@ Two views (tabs):
      metric at that rate.  Per-bucket price overrides (hit/miss/out $/1M) live
      in the collapsible left sidebar — one expander per provider.
 
-  2. Usage analytics — daily compute (compute minutes derived from the cost
-     sheet's start/end timestamps), per-model daily cache hit rates, total
-     daily cache hit rates, daily actual cost, and daily requests, each with
-     total annotations and sidebar KPIs.
+  2. Usage analytics — per-model daily cache hit rates, total daily cache hit
+     rates, daily actual cost, and daily requests, each with total
+     annotations and sidebar KPIs.
 
 Data source: the sidebar has a "Browse sheet" uploader (Provider dropdown —
 only 'deepseek' for now) that accepts a DeepSeek usage zip (cost-*.csv +
 amount-*.csv) or a single amount/cost CSV via usage_cost.load_usage_from_upload.
 When nothing is uploaded it falls back to the data directory (discover_zips).
-
-"Daily compute" is COMPUTE MINUTES derived from the cost sheet's
-start_time_iso / end_time_iso: each distinct (start, end) span per day
-contributes its elapsed minutes (the real day-bucket exports dedupe to 24h
-per active day).
 
 Run:
     streamlit run .dev/usage_monitor/app.py
@@ -247,30 +241,20 @@ def _cost_quadrant(col, display, prices, hitrate):
 def _analytics_view(overall_hit_pct):
     days = [r["day"] for r in daily]
 
-    # a. Daily compute (compute minutes from cost-sheet spans)
-    minutes = [r["compute_minutes"] for r in daily]
-    total_min = sum(minutes)
-    total_hm = f"{int(total_min // 60)}h {int(total_min % 60)}m"
-    fig = go.Figure(go.Bar(
-        x=days, y=minutes,
-        marker=dict(color=_norm(minutes, total_min), colorscale="Blues"),
-    ))
-    _top_right_annotation(fig, f"Total: {total_hm}")
-    _base_layout(fig, f"Daily compute — Total: {total_hm}", "Minutes")
-    st.plotly_chart(fig, width="stretch")
-
-    # b. Per-model daily cache hit rates
+    # a. Per-model daily cache hit rates
     flash = [r["buckets"]["flash"]["hit_rate"] * 100 for r in daily]
     pro = [r["buckets"]["ds pro"]["hit_rate"] * 100 for r in daily]
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=days, y=flash, name="flash", marker_color="#1f77b4"))
-    fig.add_trace(go.Bar(x=days, y=pro, name="ds pro", marker_color="#ff7f0e"))
-    fig.update_layout(barmode="group", showlegend=True)
+    fig.add_trace(go.Scatter(x=days, y=flash, mode="lines+markers", name="flash",
+                             line=dict(color="#1f77b4")))
+    fig.add_trace(go.Scatter(x=days, y=pro, mode="lines+markers", name="ds pro",
+                             line=dict(color="#ff7f0e")))
     _top_right_annotation(fig, f"Overall cache hit rate: {overall_hit_pct:.1f}%")
     _base_layout(fig, "Per-model daily cache hit rates", "Hit rate %")
+    fig.update_layout(showlegend=True)
     st.plotly_chart(fig, width="stretch")
 
-    # c. Total daily cache hit rates
+    # b. Total daily cache hit rates
     overall = [r["hit_rate"] * 100 for r in daily]
     fig = go.Figure(go.Bar(
         x=days, y=overall,
@@ -280,7 +264,7 @@ def _analytics_view(overall_hit_pct):
     _base_layout(fig, "Total daily cache hit rates", "Hit rate %")
     st.plotly_chart(fig, width="stretch")
 
-    # d. Daily actual cost (USD)
+    # c. Daily actual cost (USD)
     costs = [r["cost"] for r in daily]
     total_cost_v = sum(costs)
     fig = go.Figure(go.Bar(
@@ -291,7 +275,7 @@ def _analytics_view(overall_hit_pct):
     _base_layout(fig, f"Daily actual cost (USD) — Total: ${total_cost_v:,.2f}", "USD")
     st.plotly_chart(fig, width="stretch")
 
-    # e. Daily requests
+    # d. Daily requests
     reqs = [r["requests"] for r in daily]
     total_req = sum(reqs)
     fig = go.Figure(go.Bar(

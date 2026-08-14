@@ -143,24 +143,7 @@ def _day_default():
         "tokens": {b: {"hit": 0.0, "miss": 0.0, "out": 0.0} for b in BUCKETS},
         "requests": {b: 0.0 for b in BUCKETS},
         "actual": {b: 0.0 for b in BUCKETS},
-        "compute_minutes": 0.0,
     }
-
-
-def _span_minutes(start_iso, end_iso):
-    """Rough session duration in minutes from ISO-8601 timestamps.
-
-    Returns max(0, (end - start).total_seconds() / 60.0).  Any parse error
-    (bad/empty/None timestamps) or an end that is not after the start yields
-    0.0.  Used to derive "daily compute" minutes from the cost sheet's
-    start_time_iso / end_time_iso columns.
-    """
-    try:
-        start = _dt.datetime.fromisoformat(start_iso)
-        end = _dt.datetime.fromisoformat(end_iso)
-        return max(0.0, (end - start).total_seconds() / 60.0)
-    except Exception:
-        return 0.0
 
 
 def _load_amount(fh, months, unknown_models):
@@ -209,17 +192,6 @@ def _load_cost(fh, months, unknown_models):
             continue
         d = m["days"].setdefault(day, _day_default())
         d["actual"][bucket] += cost
-        # Compute minutes come from the COST sheet only (the amount sheet would
-        # double-count the same spans).  Identical (start, end) spans within a
-        # day are deduped: the real exports emit one row per model per day-bucket
-        # sharing the SAME 24h span, which should count as 1440 min/day, not 2880.
-        start = (row.get("start_time_iso") or "").strip()
-        end = (row.get("end_time_iso") or "").strip()
-        span = (start, end)
-        spans = d.setdefault("_spans", set())
-        if span not in spans:
-            spans.add(span)
-            d["compute_minutes"] += _span_minutes(start, end)
 
 
 def _finalize_usage(months, unknown_models, zips):
@@ -230,8 +202,6 @@ def _finalize_usage(months, unknown_models, zips):
         for d in m["days"].values():
             d["actual"] = {b: d["actual"][b] for b in BUCKETS}
             d["requests"] = {b: d["requests"][b] for b in BUCKETS}
-            # Internal span-dedup set — not part of the public day shape.
-            d.pop("_spans", None)
     for unk in unknown_models.values():
         unk["tokens"] = dict(sorted(unk["tokens"].items()))
     return {
@@ -468,7 +438,6 @@ def daily_summary(usage):
 
     Each entry:
         {day, cost, requests, hit, miss, out, total, hit_rate,
-         compute_minutes,
          buckets: {bucket: {hit, miss, out, requests, cost, hit_rate}}}
 
     hit_rate = hit / (hit + miss) (0.0 when there are no input tokens).
@@ -511,7 +480,6 @@ def daily_summary(usage):
                 "out": agg["out"],
                 "total": agg["hit"] + agg["miss"] + agg["out"],
                 "hit_rate": agg["hit"] / total_inp if total_inp else 0.0,
-                "compute_minutes": float(ddata.get("compute_minutes", 0.0)),
                 "buckets": buckets,
             })
     return sorted(rows, key=lambda r: r["day"])

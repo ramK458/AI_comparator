@@ -1,12 +1,12 @@
 # Usage Cost Monitor
 
-Streamlit dashboard (v3) built on top of `usage_cost.py` — reads DeepSeek usage
+Streamlit dashboard built on top of `usage_cost.py` — reads DeepSeek usage
 exports (either an uploaded **sheet** or `usage_data_*.zip` from `_data/usage/`),
 buckets models into `flash` / `ds pro` via an explicit allowlist, and projects
 what the same usage would cost across four providers: DeepSeek, OpenAI, Claude,
 and OpenCode Go.
 
-## Features (v3)
+## Features
 
 Two views, switched via tabs:
 
@@ -34,8 +34,7 @@ active source is shown as a caption (`Sheet: <name>` or `Directory: <path>`).
 
 2. **Usage analytics** (driven by `usage_cost.daily_summary`) — daily charts
    with total annotations:
-   - **Daily compute (total tokens)** — `hit + miss + out` per day;
-   - **Per-model daily cache hit rates** — grouped bars (`flash` / `ds pro`);
+   - **Per-model daily cache hit rates** — line plots (`flash` / `ds pro`);
    - **Total daily cache hit rates** — overall daily `hit_rate %`;
    - **Daily actual cost (USD)**;
    - **Daily requests**;
@@ -49,27 +48,22 @@ There is **one shared sidebar slider** (`Cache hit rate %`, 90–100) that drive
 defaults to the actual cache hit rate from the data (`hit / (hit + miss)`),
 clamped into [90, 100].
 
-> **"Daily compute"** is modeled as **daily total tokens** (`hit + miss + out`)
-> because the usage data has no wall-clock compute time.
+## Setup & run
 
-## Setup
-
-```bash
-python3.11 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-```
-
-Dependencies: `streamlit>=1.30`, `plotly>=5.18` (nothing else).
-
-## Run
-
-From the repository root:
+From the project root (the folder containing `app.py` and `usage_cost.py`):
 
 ```bash
-.venv/bin/streamlit run .dev/usage_monitor/app.py
+cd <project root>                              # 1. go to the project root
+python3.11 -m venv .venv                       # 2. create the venv (one time)
+.venv/bin/pip install -r requirements.txt      # 3. install dependencies (one time)
+.venv/bin/streamlit run app.py                 # 4. start the dashboard
 ```
 
-Open the printed local URL (default `http://localhost:8501`).
+Or just `./run.sh` — it creates the venv + installs deps on first run, then
+starts the app. The `.venv` lives in the project root, next to `app.py`.
+
+Dependencies: `streamlit>=1.30`, `plotly>=5.18` (nothing else). Open the printed
+local URL (default `http://localhost:8501`).
 
 ## Data source
 
@@ -86,11 +80,10 @@ OpenCode Go **meter** rates loaded offline (embedded defaults if no cache).
 
 ## Tests
 
-Tests live under `tests/` in this folder (`.dev/usage_monitor/tests/`). The
-canonical run:
+Tests live in `tests/` next to the app. From the project root:
 
 ```bash
-cd .dev/usage_monitor && /usr/local/bin/python3.11 -m pytest tests -q
+python3.11 -m pytest tests -q
 ```
 
 Covers bucketing, cost math, price-table parsing, the DeepSeek sheet-format
