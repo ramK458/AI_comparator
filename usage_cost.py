@@ -143,7 +143,24 @@ def _day_default():
         "tokens": {b: {"hit": 0.0, "miss": 0.0, "out": 0.0} for b in BUCKETS},
         "requests": {b: 0.0 for b in BUCKETS},
         "actual": {b: 0.0 for b in BUCKETS},
+        "compute_minutes": 0.0,
     }
+
+
+def _span_minutes(start_iso, end_iso):
+    """Rough session duration in minutes from ISO-8601 timestamps.
+
+    Returns max(0, (end - start).total_seconds() / 60.0).  Any parse error
+    (bad/empty/None timestamps) or an end that is not after the start yields
+    0.0.  Used to derive "daily compute" minutes from the cost sheet's
+    start_time_iso / end_time_iso columns.
+    """
+    try:
+        start = _dt.datetime.fromisoformat(start_iso)
+        end = _dt.datetime.fromisoformat(end_iso)
+        return max(0.0, (end - start).total_seconds() / 60.0)
+    except Exception:
+        return 0.0
 
 
 def _load_amount(fh, months, unknown_models):
@@ -192,10 +209,40 @@ def _load_cost(fh, months, unknown_models):
             continue
         d = m["days"].setdefault(day, _day_default())
         d["actual"][bucket] += cost
+        # Compute minutes come from the COST sheet only (the amount sheet would
+        # double-count the same spans).  Identical (start, end) spans within a
+        # day are deduped: the real exports emit one row per model per day-bucket
+        # sharing the SAME 24h span, which should count as 1440 min/day, not 2880.
+        start = (row.get("start_time_iso") or "").strip()
+        end = (row.get("end_time_iso") or "").strip()
+        span = (start, end)
+        spans = d.setdefault("_spans", set())
+        if span not in spans:
+            spans.add(span)
+            d["compute_minutes"] += _span_minutes(start, end)
+
+
+def _finalize_usage(months, unknown_models, zips):
+    """Normalize loaded months/unknowns and return the standard usage dict."""
+    for m in months.values():
+        m["days"] = dict(sorted(m["days"].items()))
+        m["actual_by_model"] = dict(sorted(m["actual_by_model"].items()))
+        for d in m["days"].values():
+            d["actual"] = {b: d["actual"][b] for b in BUCKETS}
+            d["requests"] = {b: d["requests"][b] for b in BUCKETS}
+            # Internal span-dedup set — not part of the public day shape.
+            d.pop("_spans", None)
+    for unk in unknown_models.values():
+        unk["tokens"] = dict(sorted(unk["tokens"].items()))
+    return {
+        "months": dict(sorted(months.items())),
+        "unknown_models": unknown_models,
+        "zips": list(zips),
+    }
 
 
 def load_usage(zip_paths):
-    """Read cost-*.csv + amount-*.csv from each zip.
+    """Read DeepSeek-format cost-*.csv + amount-*.csv from each zip.
 
     Returns:
         months: {month: {days: {day: {"tokens": {bucket: {hit,miss,out}},
@@ -215,21 +262,38 @@ def load_usage(zip_paths):
                     _load_amount(z.open(name), months, unknown_models)
                 elif base.startswith("cost-") and base.endswith(".csv"):
                     _load_cost(z.open(name), months, unknown_models)
+    return _finalize_usage(months, unknown_models, zip_paths)
 
-    for m in months.values():
-        m["days"] = dict(sorted(m["days"].items()))
-        m["actual_by_model"] = dict(sorted(m["actual_by_model"].items()))
-        for d in m["days"].values():
-            d["actual"] = {b: d["actual"][b] for b in BUCKETS}
-            d["requests"] = {b: d["requests"][b] for b in BUCKETS}
-    for unk in unknown_models.values():
-        unk["tokens"] = dict(sorted(unk["tokens"].items()))
 
-    return {
-        "months": dict(sorted(months.items())),
-        "unknown_models": unknown_models,
-        "zips": list(zip_paths),
-    }
+def load_usage_from_upload(name, data):
+    """Load a DeepSeek-format sheet from uploaded bytes.
+
+    Accepts either a zip (containing `cost-*.csv` + `amount-*.csv`) or a single
+    DeepSeek amount/cost CSV.  `name` is the original filename (used to decide
+    the kind); `data` is the raw bytes.  Returns the same shape as load_usage().
+    """
+    months = {}
+    unknown_models = {}
+    base = (name or "").lower()
+    if base.endswith(".zip"):
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            for n in z.namelist():
+                bn = os.path.basename(n)
+                if bn.startswith("amount-") and bn.endswith(".csv"):
+                    _load_amount(z.open(n), months, unknown_models)
+                elif bn.startswith("cost-") and bn.endswith(".csv"):
+                    _load_cost(z.open(n), months, unknown_models)
+    else:
+        text = data.decode("utf-8", errors="replace")
+        header = text.splitlines()[0].lower() if text.strip() else ""
+        # _load_amount/_load_cost wrap the handle in io.TextIOWrapper, so pass
+        # binary bytes (io.StringIO would raise a TypeError inside the reader).
+        bio = io.BytesIO(text.encode("utf-8"))
+        if "type" in header and "amount" in header:
+            _load_amount(bio, months, unknown_models)
+        else:
+            _load_cost(bio, months, unknown_models)
+    return _finalize_usage(months, unknown_models, [name or "upload"])
 
 
 # ---------------------------------------------------------------------------
@@ -404,6 +468,7 @@ def daily_summary(usage):
 
     Each entry:
         {day, cost, requests, hit, miss, out, total, hit_rate,
+         compute_minutes,
          buckets: {bucket: {hit, miss, out, requests, cost, hit_rate}}}
 
     hit_rate = hit / (hit + miss) (0.0 when there are no input tokens).
@@ -446,6 +511,7 @@ def daily_summary(usage):
                 "out": agg["out"],
                 "total": agg["hit"] + agg["miss"] + agg["out"],
                 "hit_rate": agg["hit"] / total_inp if total_inp else 0.0,
+                "compute_minutes": float(ddata.get("compute_minutes", 0.0)),
                 "buckets": buckets,
             })
     return sorted(rows, key=lambda r: r["day"])
