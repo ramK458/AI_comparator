@@ -3,11 +3,15 @@
 Streamlit dashboard that projects DeepSeek usage costs across four providers:
 DeepSeek, OpenAI, Claude, and OpenCode Go.
 
+<<<<<<< HEAD
 The goal is to give a rough idea on costs across different providers for users using DeepSeek Official API. 
 Export your monthly usage. Upload in the Streamlit UI. Shows comparison for 4 combinations. 
 Replaces DS Flash with the cheapest model and DS Pro with the expensive model. 
 
 [For informational purposes only. Use at your discretion.]
+=======
+![Usage Cost Monitor dashboard](assets/sample)
+>>>>>>> 0c75611 (added sample image to readme)
 
 ## Getting started
 
