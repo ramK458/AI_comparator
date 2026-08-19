@@ -119,7 +119,19 @@ with st.sidebar:
 
     daily = uc.daily_summary(usage)
     if not daily:
-        st.info("No usage rows found in the selected source.")
+        st.warning("No usage rows found in the selected source.")
+        unknown = usage.get("unknown_models") or {}
+        if unknown:
+            st.error("The sheet contains model names that are not in the supported "
+                     "allowlist. Supported models: `deepseek-v4-flash`, `deepseek-v4-pro`.")
+            for model, info in sorted(unknown.items()):
+                tok = ", ".join(f"{t}={v:,.0f}" for t, v in sorted(info.get("tokens", {}).items()))
+                st.write(f"- **{model}**: cost=${info.get('cost', 0.0):,.2f}; tokens [{tok}]")
+        else:
+            members = usage.get("members") or []
+            st.error("No recognized usage rows found. Expected zip members named "
+                     "`cost-*.csv` / `amount-*.csv` with headers `model` and `start_time_iso`.")
+            st.write(f"Zip members found: {', '.join(members) if members else '(none)'}")
         st.stop()
 
     tokens = uc.total_tokens(usage)

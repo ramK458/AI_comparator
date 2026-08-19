@@ -22,6 +22,8 @@ USAGE_DATA_DIR = pathlib.Path(__file__).resolve().parents[3] / "_data" / "usage"
 
 AMOUNT_HEADER = "user_id,start_time_iso,end_time_iso,model,api_key_name,api_key,type,price,amount"
 COST_HEADER = "user_id,start_time_iso,end_time_iso,model,wallet_type,cost,currency"
+UTC_AMOUNT_HEADER = "user_id,utc_date,model,api_key_name,api_key,type,price,amount"
+UTC_COST_HEADER = "user_id,utc_date,model,wallet_type,cost,currency"
 
 
 def _make_zip(tmp_path, name, cost_rows=(), amount_rows=()):
@@ -178,6 +180,121 @@ def test_upload_unknown_model_in_deepseek_sheet():
     assert unk["mystery-model"]["tokens"]["output_tokens"] == pytest.approx(777)
     # unknown model is NOT bucketed into per-provider math
     assert "mystery-model" not in usage["months"]["2026-06"]["days"]["2026-06-01"]["tokens"]
+
+
+# ---------------------------------------------------------------------------
+# members key + empty-daily diagnostic (v4)
+# ---------------------------------------------------------------------------
+
+def test_members_key_present_for_zip(tmp_path):
+    zp = _make_zip(
+        tmp_path, "usage_data_2026-06-01_2026-06-30.zip",
+        cost_rows=[
+            "u,2026-06-01T00:00:00+02:00,2026-06-02T00:00:00+02:00,deepseek-v4-flash,Paid,10.0,USD",
+        ],
+        amount_rows=[
+            "u,2026-06-01T00:00:00+02:00,2026-06-02T00:00:00+02:00,deepseek-v4-flash,k,n,"
+            "input_cache_hit_tokens,0.0000000028,1000000",
+        ],
+    )
+    usage = uc.load_usage([zp])
+    assert set(usage["members"]) == {
+        "cost-usage_data_2026-06-01_2026-06-30.zip.csv",
+        "amount-usage_data_2026-06-01_2026-06-30.zip.csv",
+    }
+
+
+def test_members_key_present_for_single_csv_upload():
+    csv_text = (
+        AMOUNT_HEADER + "\n"
+        "u,2026-06-01T00:00:00+02:00,2026-06-02T00:00:00+02:00,deepseek-v4-flash,k,n,"
+        "input_cache_hit_tokens,0.0000000028,1000000\n"
+    ).encode("utf-8")
+    usage = uc.load_usage_from_upload("amount-2026-06.csv", csv_text)
+    assert usage["members"] == ["amount-2026-06.csv"]
+
+
+def test_unknown_model_zip_yields_empty_daily_and_members(tmp_path):
+    # A zip whose only model is NOT in the allowlist -> no daily rows, but the
+    # unknown model + zip members are surfaced for the diagnostic.
+    p = os.path.join(str(tmp_path), "usage_data_2026-06-01_2026-06-30.zip")
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr("cost-usage.csv", COST_HEADER + "\n"
+                   "u,2026-06-01T00:00:00+02:00,2026-06-02T00:00:00+02:00,deepseek-chat,Paid,10.0,USD\n")
+        z.writestr("amount-usage.csv", AMOUNT_HEADER + "\n"
+                   "u,2026-06-01T00:00:00+02:00,2026-06-02T00:00:00+02:00,deepseek-chat,k,n,"
+                   "input_cache_hit_tokens,0.0000000028,1000000\n")
+    usage = uc.load_usage([p])
+    assert uc.daily_summary(usage) == []
+    assert "deepseek-chat" in usage["unknown_models"]
+    assert usage["unknown_models"]["deepseek-chat"]["cost"] == pytest.approx(10.0)
+    assert set(usage["members"]) == {"cost-usage.csv", "amount-usage.csv"}
+
+
+def test_wrong_member_names_zip_shows_actual_members(tmp_path):
+    # A zip whose members are NOT named cost-*.csv / amount-*.csv -> nothing is
+    # loaded, but members surfaces the real names for the diagnostic.
+    p = os.path.join(str(tmp_path), "usage_data_2026-06-01_2026-06-30.zip")
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr("usage.csv", "name,value\nignore,1\n")
+    usage = uc.load_usage([p])
+    assert uc.daily_summary(usage) == []
+    assert usage["unknown_models"] == {}
+    assert usage["members"] == ["usage.csv"]
+
+
+def test_alternate_csv_member_names_are_classified_by_headers(tmp_path):
+    p = os.path.join(str(tmp_path), "usage_data_2026-06-01_2026-06-30.zip")
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr("export_amounts.csv", AMOUNT_HEADER + "\n"
+                   "u,2026-06-01T00:00:00+02:00,2026-06-02T00:00:00+02:00,"
+                   "deepseek-v4-flash,k,n,input_cache_hit_tokens,0.0,1000000\n")
+        z.writestr("export-costs.csv", COST_HEADER + "\n"
+                   "u,2026-06-01T00:00:00+02:00,2026-06-02T00:00:00+02:00,"
+                   "deepseek-v4-flash,Paid,10.0,USD\n")
+        z.writestr("notes.csv", "name,value\nignore,1\n")
+
+    usage = uc.load_usage([p])
+    day = usage["months"]["2026-06"]["days"]["2026-06-01"]
+    assert day["tokens"]["flash"]["hit"] == pytest.approx(1_000_000)
+    assert day["actual"]["flash"] == pytest.approx(10.0)
+    assert usage["members"] == ["export_amounts.csv", "export-costs.csv", "notes.csv"]
+
+
+def test_utc_date_zip_buckets_compact_dates(tmp_path):
+    p = os.path.join(str(tmp_path), "usage_data_2026-06-01_2026-06-30.zip")
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr("export.csv", UTC_AMOUNT_HEADER + "\n"
+                   "u,20260629,deepseek-v4-flash,k,n,input_cache_hit_tokens,0.0,1000000\n"
+                   "u,20260701,deepseek-v4-pro,k,n,output_tokens,0.0,500000\n")
+        z.writestr("billing.csv", UTC_COST_HEADER + "\n"
+                   "u,20260629,deepseek-v4-flash,Paid,10.0,USD\n"
+                   "u,20260701,deepseek-v4-pro,Paid,4.0,USD\n")
+
+    usage = uc.load_usage([p])
+    assert set(usage["months"]) == {"2026-06", "2026-07"}
+    assert usage["months"]["2026-06"]["days"]["2026-06-29"]["tokens"]["flash"]["hit"] == pytest.approx(1_000_000)
+    assert usage["months"]["2026-06"]["days"]["2026-06-29"]["actual"]["flash"] == pytest.approx(10.0)
+    assert usage["months"]["2026-07"]["days"]["2026-07-01"]["tokens"]["ds pro"]["out"] == pytest.approx(500_000)
+    assert usage["months"]["2026-07"]["days"]["2026-07-01"]["actual"]["ds pro"] == pytest.approx(4.0)
+
+
+def test_utc_date_single_csv_upload():
+    csv_text = (UTC_AMOUNT_HEADER + "\n"
+                "u,20260630,deepseek-v4-flash,k,n,request_count,0.0,12\n").encode("utf-8")
+    usage = uc.load_usage_from_upload("export.csv", csv_text)
+    day = usage["months"]["2026-06"]["days"]["2026-06-30"]
+    assert day["requests"]["flash"] == pytest.approx(12.0)
+
+
+def test_unrelated_csv_with_utc_date_is_ignored(tmp_path):
+    p = os.path.join(str(tmp_path), "usage_data_2026-06-01_2026-06-30.zip")
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr("notes.csv", "user_id,utc_date,model,value\n"
+                   "u,20260629,deepseek-v4-flash,1\n")
+    usage = uc.load_usage([p])
+    assert usage["months"] == {}
+    assert usage["unknown_models"] == {}
 
 
 # ---------------------------------------------------------------------------

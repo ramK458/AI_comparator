@@ -131,6 +131,12 @@ def discover_zips(data_dir):
 
 def _parse_date(iso):
     """Day-bucket key from an ISO-8601 start timestamp (e.g. 2026-06-01)."""
+    compact = str(iso or "").strip()
+    if re.fullmatch(r"\d{8}", compact):
+        try:
+            return _dt.datetime.strptime(compact, "%Y%m%d").date().isoformat()
+        except ValueError:
+            pass
     try:
         return _dt.datetime.fromisoformat(iso).date().isoformat()
     except Exception:
@@ -156,7 +162,7 @@ def _load_amount(fh, months, unknown_models):
             continue
         model = (row.get("model") or "").strip()
         bucket = MODEL_BUCKET.get(model)
-        day = _parse_date(row.get("start_time_iso") or "")
+        day = _parse_date(row.get("start_time_iso") or row.get("utc_date") or "")
         if not day:
             continue
         if bucket is None:
@@ -180,10 +186,14 @@ def _load_cost(fh, months, unknown_models):
         except ValueError:
             continue
         model = (row.get("model") or "").strip()
-        day = _parse_date(row.get("start_time_iso") or "")
+        day = _parse_date(row.get("start_time_iso") or row.get("utc_date") or "")
         if not day:
             continue
         month = day[:7]
+        # NOTE: the month entry is created BEFORE the unknown-model check, so an
+        # unknown-model cost row leaves a month with EMPTY days.  `months` being
+        # non-empty is therefore NOT a reliable 'has data' signal — diagnostics
+        # must check days, not months.
         m = months.setdefault(month, {"days": {}, "actual_by_model": collections.defaultdict(float)})
         m["actual_by_model"][model] += cost
         bucket = MODEL_BUCKET.get(model)
@@ -194,7 +204,40 @@ def _load_cost(fh, months, unknown_models):
         d["actual"][bucket] += cost
 
 
-def _finalize_usage(months, unknown_models, zips):
+def _csv_member_kind(name, data):
+    """Return ``amount`` or ``cost`` for a supported CSV member.
+
+    DeepSeek exports do not always preserve the ``amount-``/``cost-``
+    filename prefixes.  Use the header as a fallback, but require the
+    distinguishing columns so unrelated CSV files are left untouched.
+    """
+    base = os.path.basename(name)
+    if base.startswith("amount-") and base.endswith(".csv"):
+        return "amount"
+    if base.startswith("cost-") and base.endswith(".csv"):
+        return "cost"
+    try:
+        header = next(csv.reader(io.TextIOWrapper(io.BytesIO(data), encoding="utf-8")))
+    except (StopIteration, UnicodeDecodeError, csv.Error):
+        return None
+    columns = {column.strip().lower() for column in header}
+    has_date = bool({"start_time_iso", "utc_date"} & columns)
+    if {"type", "amount", "model"}.issubset(columns) and has_date:
+        return "amount"
+    if {"cost", "model"}.issubset(columns) and has_date:
+        return "cost"
+    return None
+
+
+def _load_csv_member(name, data, months, unknown_models):
+    kind = _csv_member_kind(name, data)
+    if kind == "amount":
+        _load_amount(io.BytesIO(data), months, unknown_models)
+    elif kind == "cost":
+        _load_cost(io.BytesIO(data), months, unknown_models)
+
+
+def _finalize_usage(months, unknown_models, zips, members=None):
     """Normalize loaded months/unknowns and return the standard usage dict."""
     for m in months.values():
         m["days"] = dict(sorted(m["days"].items()))
@@ -208,6 +251,7 @@ def _finalize_usage(months, unknown_models, zips):
         "months": dict(sorted(months.items())),
         "unknown_models": unknown_models,
         "zips": list(zips),
+        "members": list(members or []),
     }
 
 
@@ -221,18 +265,19 @@ def load_usage(zip_paths):
                          "actual_by_model": {model: cost}}}
         unknown_models: {model: {"tokens": {type: amount}, "cost": cost}}
         zips: list of zip paths read
+        members: list of zip member basenames (for diagnostics)
     """
     months = {}
     unknown_models = {}
+    members = []
     for zp in zip_paths:
         with zipfile.ZipFile(zp) as z:
             for name in z.namelist():
                 base = os.path.basename(name)
-                if base.startswith("amount-") and base.endswith(".csv"):
-                    _load_amount(z.open(name), months, unknown_models)
-                elif base.startswith("cost-") and base.endswith(".csv"):
-                    _load_cost(z.open(name), months, unknown_models)
-    return _finalize_usage(months, unknown_models, zip_paths)
+                members.append(base)
+                if base.endswith(".csv"):
+                    _load_csv_member(name, z.read(name), months, unknown_models)
+    return _finalize_usage(months, unknown_models, zip_paths, members)
 
 
 def load_usage_from_upload(name, data):
@@ -246,14 +291,15 @@ def load_usage_from_upload(name, data):
     unknown_models = {}
     base = (name or "").lower()
     if base.endswith(".zip"):
+        members = []
         with zipfile.ZipFile(io.BytesIO(data)) as z:
             for n in z.namelist():
                 bn = os.path.basename(n)
-                if bn.startswith("amount-") and bn.endswith(".csv"):
-                    _load_amount(z.open(n), months, unknown_models)
-                elif bn.startswith("cost-") and bn.endswith(".csv"):
-                    _load_cost(z.open(n), months, unknown_models)
+                members.append(bn)
+                if bn.endswith(".csv"):
+                    _load_csv_member(n, z.read(n), months, unknown_models)
     else:
+        members = [name or "upload"]
         text = data.decode("utf-8", errors="replace")
         header = text.splitlines()[0].lower() if text.strip() else ""
         # _load_amount/_load_cost wrap the handle in io.TextIOWrapper, so pass
@@ -263,7 +309,7 @@ def load_usage_from_upload(name, data):
             _load_amount(bio, months, unknown_models)
         else:
             _load_cost(bio, months, unknown_models)
-    return _finalize_usage(months, unknown_models, [name or "upload"])
+    return _finalize_usage(months, unknown_models, [name or "upload"], members)
 
 
 # ---------------------------------------------------------------------------
